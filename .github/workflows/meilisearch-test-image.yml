@@ -55,7 +55,7 @@ jobs:
         run: |
           docker network create openlist-count-test
           docker run -d --name count-meili --network openlist-count-test -p 127.0.0.1:17700:7700 -e MEILI_ENV=development -e MEILI_NO_ANALYTICS=true getmeili/meilisearch:v1.56.1
-          docker run -d --name count-openlist --network openlist-count-test -p 127.0.0.1:15244:5244 -e OPENLIST_ADMIN_PASSWORD=openlist-count-ci-test-only -e MEILISEARCH_HOST=http://count-meili:7700 -e MEILISEARCH_INDEX=openlist_count_smoke "$IMAGE"
+          docker run -d --name count-openlist --user 0:0 --network openlist-count-test -p 127.0.0.1:15244:5244 -e OPENLIST_ADMIN_PASSWORD=openlist-count-ci-test-only -e MEILISEARCH_HOST=http://count-meili:7700 -e MEILISEARCH_INDEX=openlist_count_smoke "$IMAGE"
           python3 scripts/smoke-meilisearch-count.py
 
       - name: Container logs on failure
