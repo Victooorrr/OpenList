@@ -1,0 +1,87 @@
+name: Meilisearch count test image
+
+on:
+  push:
+    branches: [test/meilisearch-count-v4.2.9]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: meilisearch-count-test-image
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/victooorrr/openlist-test:v4.2.9-meili-count-1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.27.3'
+
+      - name: Fetch the matching v4.2.9 frontend
+        run: |
+          mkdir -p public/dist
+          curl -fSL --retry 3 https://github.com/OpenListTeam/OpenList-Frontend/releases/download/v4.2.9/openlist-frontend-dist-v4.2.9.tar.gz -o /tmp/frontend.tar.gz
+          tar -xzf /tmp/frontend.tar.gz -C public/dist
+          test -f public/dist/index.html
+
+      - name: Run unit tests
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          go test ./internal/search/... ./internal/db/... ./internal/transcode/... ./internal/media/... ./internal/fs/... ./server/handles/... ./server/common/... ./pkg/torrent/...
+          go vet ./internal/search/... ./server/handles/...
+
+      - name: Build the Linux amd64 binary and image
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p build/linux/amd64
+          built_at="$(date -u '+%Y-%m-%d %H:%M:%S +0000')"
+          flags="-s -w -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$built_at' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$GITHUB_SHA' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=v4.2.9-meili-count-test1' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=v4.2.9'"
+          go build -trimpath -tags=jsoniter -ldflags "$flags" -o build/linux/amd64/openlist .
+          build/linux/amd64/openlist version
+          docker build --platform linux/amd64 -f Dockerfile.ci --build-arg TARGETPLATFORM=linux/amd64 --label "org.opencontainers.image.source=https://github.com/Victooorrr/OpenList" --label "org.opencontainers.image.revision=$GITHUB_SHA" --label "org.opencontainers.image.description=OpenList v4.2.9 with Meilisearch live-count fix; Codex-assisted test build" -t "$IMAGE" .
+
+      - name: Test the image against a real Meilisearch server
+        run: |
+          docker network create openlist-count-test
+          docker run -d --name count-meili --network openlist-count-test -p 127.0.0.1:17700:7700 -e MEILI_ENV=development -e MEILI_NO_ANALYTICS=true getmeili/meilisearch:v1.56.1
+          docker run -d --name count-openlist --network openlist-count-test -p 127.0.0.1:15244:5244 -e OPENLIST_ADMIN_PASSWORD=openlist-count-ci-test-only -e MEILISEARCH_HOST=http://count-meili:7700 -e MEILISEARCH_INDEX=openlist_count_smoke "$IMAGE"
+          python3 scripts/smoke-meilisearch-count.py
+
+      - name: Container logs on failure
+        if: failure()
+        run: |
+          docker logs count-openlist 2>&1 || true
+          docker logs count-meili 2>&1 || true
+
+      - name: Publish the test image to the fork owner's registry
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE"
+          docker inspect --format '{{json .RepoDigests}}' "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save an offline import copy
+        run: |
+          mkdir -p image-export
+          docker save "$IMAGE" | gzip -1 > image-export/openlist-v4.2.9-meili-count-1-amd64.tar.gz
+          cd image-export
+          sha256sum *.tar.gz > SHA256SUMS
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: openlist-v4.2.9-meili-count-1-amd64
+          path: image-export/
+          compression-level: 0
+          retention-days: 14
